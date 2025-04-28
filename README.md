@@ -68,7 +68,7 @@ pip install -r requirements.txt
     ```bash
     python audio_toolkit_gui/main.py
     ```
-    or if you are already inside the `audio_toolkit` directory:
+    or if you are already inside the `audio_toolkit_gui` directory:
     ```bash
     python main.py
     ```
@@ -105,7 +105,7 @@ The application window should appear.
 
 ```
 audio_toolkit/
-├── main_app.py         # Main application window and GUI logic
+├── main.py             # Main application window and GUI logic
 ├── ui_widgets.py       # Custom PyQt5 widgets (DropListWidget, DropLineEdit)
 ├── worker_tasks.py     # Background task functions (splitting, converting, etc.) and Worker thread class
 ├── utils.py            # General helper functions (ffmpeg, file scanning, logging, deletion)
