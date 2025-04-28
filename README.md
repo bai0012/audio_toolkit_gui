@@ -66,11 +66,11 @@ pip install -r requirements.txt
 3.  Run the main application script:
 
     ```bash
-    python audio_toolkit/main_app.py
+    python audio_toolkit/main.py
     ```
     or if you are already inside the `audio_toolkit` directory:
     ```bash
-    python main_app.py
+    python main.py
     ```
 
 The application window should appear.
