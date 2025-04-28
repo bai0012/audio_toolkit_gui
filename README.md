@@ -2,8 +2,7 @@
 
 A Python application with a graphical user interface (GUI) for performing various audio processing tasks, including CUE sheet splitting, WAV to FLAC conversion, metadata editing, and FLAC cover art embedding.
 
-![Screenshot Placeholder](screenshot.png)
-*Replace this text and image with a screenshot of your application's main window.*
+![Screenshot](screenshot.png)
 
 ## Features
 
