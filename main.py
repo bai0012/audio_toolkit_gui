@@ -124,11 +124,11 @@ class AudioToolApp(QMainWindow):
         layout = QVBoxLayout(self.tab_cue_splitter)
         layout.setSpacing(10)
 
-        # Input Files List
+        # Input Files List (No changes needed here)
         list_label = QLabel("Drag & Drop CUE files or folders containing them:")
         self.cue_list_widget = DropListWidget(accepted_extensions=CUE_EXTENSIONS)
         self.cue_list_widget.filesDropped.connect(self._add_cue_files_from_drop)
-        self.cue_list_widget.setFixedHeight(150)  # Limit height
+        self.cue_list_widget.setFixedHeight(150)
 
         list_button_layout = QVBoxLayout()
         list_button_layout.setSpacing(5)
@@ -144,7 +144,7 @@ class AudioToolApp(QMainWindow):
         list_button_layout.addWidget(clear_cue_list_button)
 
         list_area_layout = QHBoxLayout()
-        list_area_layout.addWidget(self.cue_list_widget, 3)  # List takes more space
+        list_area_layout.addWidget(self.cue_list_widget, 3)
         list_area_layout.addLayout(list_button_layout, 1)
 
         layout.addWidget(list_label)
@@ -156,48 +156,52 @@ class AudioToolApp(QMainWindow):
         options_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
         options_layout.setLabelAlignment(Qt.AlignRight)
 
-        # Output Format
+        # Output Format (No changes)
         self.cue_format_combo = QComboBox()
         self.cue_format_combo.addItems(CUE_OUTPUT_FORMATS)
-        self.cue_format_combo.setCurrentText("flac")  # Default
+        self.cue_format_combo.setCurrentText("flac")
         options_layout.addRow("Output Format:", self.cue_format_combo)
 
-        # Collection Subdirectory
+        # Collection Subdirectory (No changes)
         self.cue_collection_combo = QComboBox()
         self.cue_collection_combo.addItems(CUE_COLLECTION_OPTS.keys())
-        self.cue_collection_combo.setCurrentText("None")  # Default
+        self.cue_collection_combo.setCurrentText("None")
         options_layout.addRow("Create Subdirectory:", self.cue_collection_combo)
 
-        # Output Directory
+        # --- MODIFICATION START ---
+        # Output Directory - Use DropLineEdit instead of QLineEdit
         output_dir_layout = QHBoxLayout()
-        self.cue_outputdir_edit = QLineEdit()
+        self.cue_outputdir_edit = DropLineEdit()  # Use DropLineEdit
         self.cue_outputdir_edit.setPlaceholderText(
-            "Default: Same directory as CUE file"
+            "Default: Same directory as CUE file (or drop folder)"
+        )
+        # Optionally connect the signal for logging
+        self.cue_outputdir_edit.pathDropped.connect(
+            lambda path: self.log_message(f"Output directory set via drop: {path}")
         )
         browse_output_button = QPushButton("Browse...")
         browse_output_button.clicked.connect(self._select_cue_output_dir)
         output_dir_layout.addWidget(self.cue_outputdir_edit)
         output_dir_layout.addWidget(browse_output_button)
         options_layout.addRow("Output Directory (Optional):", output_dir_layout)
+        # --- MODIFICATION END ---
 
-        # Overwrite Option
+        # Overwrite Option (No changes)
         self.cue_overwrite_checkbox = QCheckBox(
             "Overwrite existing split files in destination"
         )
-        self.cue_overwrite_checkbox.setChecked(False)  # Default: Never overwrite
-        options_layout.addRow(
-            "", self.cue_overwrite_checkbox
-        )  # Add checkbox without label on left
+        self.cue_overwrite_checkbox.setChecked(False)
+        options_layout.addRow("", self.cue_overwrite_checkbox)
 
         layout.addWidget(options_group)
 
-        # Action Button
+        # Action Button (No changes)
         self.run_split_cue_button = QPushButton("Start Splitting CUE Files")
         self.run_split_cue_button.setFixedHeight(35)
         self.run_split_cue_button.clicked.connect(self._run_split_cue)
         layout.addWidget(self.run_split_cue_button, alignment=Qt.AlignCenter)
 
-        layout.addStretch()  # Push elements towards top
+        layout.addStretch()
 
     def _setup_add_cover_tab(self):
         # (Unchanged from previous version, ensure imports correct)

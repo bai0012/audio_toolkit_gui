@@ -10,7 +10,12 @@ from typing import List, Dict, Any, Optional
 from PyQt5.QtCore import QObject, pyqtSignal, QThread
 
 # Import helpers from utils
-from utils import find_ffmpeg, find_ffprobe, run_ffmpeg_command, safe_delete
+from utils import (  # Ensure safe_delete is imported
+    find_ffmpeg,
+    find_ffprobe,
+    run_ffmpeg_command,
+    safe_delete,
+)
 
 # Import constants
 from constants import (
@@ -510,7 +515,6 @@ def task_split_cue(
     fail_count = 0
     skipped_count = 0
 
-    # Check for required library first
     try:
         from ffcuesplitter.cuesplitter import FFCueSplitter
         from ffcuesplitter.user_service import FileSystemOperations
@@ -521,7 +525,6 @@ def task_split_cue(
 
     ffmpeg_path = find_ffmpeg()
     ffprobe_path = find_ffprobe()
-
     if not ffmpeg_path or not ffprobe_path:
         msg = f"[!] Error: {'FFmpeg' if not ffmpeg_path else ''}{' and ' if not ffmpeg_path and not ffprobe_path else ''}{'FFprobe' if not ffprobe_path else ''} not found in PATH."
         progress_callback(msg)
@@ -531,26 +534,25 @@ def task_split_cue(
         processed_count += 1
         progress_callback(f"\nProcessing CUE: {os.path.basename(cue_file)}")
         cue_dir = os.path.dirname(cue_file)
-        effective_output_dir = (
-            output_dir if output_dir else cue_dir
-        )  # Default output to CUE dir
+        # Determine where ffcuesplitter *will* output based on settings
+        effective_output_dir = output_dir if output_dir else cue_dir
 
-        # 1. Get info using FFCueSplitter (needed for cleanup)
+        # --- Start of Step 1: Get Info ---
         original_audio_files = set()
         split_successful = False
         try:
+            # ... (info getting logic remains the same) ...
             info_getter = FFCueSplitter(
                 filename=cue_file, dry=True, prg_loglevel="error"
-            )  # Suppress logs here
+            )
             tracks = info_getter.audiotracks
             if not tracks:
                 progress_callback(
                     f"  [!] Error: Could not read tracks or audio file info from CUE."
                 )
                 fail_count += 1
-                continue  # Skip to next cue file
+                continue
 
-            # Find the audio file(s) referenced relative to the CUE file
             for track in tracks:
                 if "FILE" in track:
                     audio_path_in_cue = track["FILE"]
@@ -560,7 +562,6 @@ def task_split_cue(
                     if os.path.exists(full_audio_path):
                         original_audio_files.add(full_audio_path)
                     else:
-                        # Try matching base name in same dir (less common for CUE)
                         cue_base = os.path.splitext(os.path.basename(cue_file))[0]
                         audio_ext = os.path.splitext(audio_path_in_cue)[1]
                         alt_audio_path = os.path.normpath(
@@ -583,8 +584,9 @@ def task_split_cue(
             progress_callback(f"  [!] Error getting info from CUE: {e_info}")
             fail_count += 1
             continue
+        # --- End of Step 1 ---
 
-        # 2. Perform split using FileSystemOperations
+        # --- Start of Step 2: Perform Split ---
         progress_callback(
             f"  Splitting to format '{output_format}' into: {effective_output_dir}"
             + (f" (Collection: {collection})" if collection else "")
@@ -592,7 +594,7 @@ def task_split_cue(
         try:
             kwargs = {
                 "filename": cue_file,
-                "outputdir": effective_output_dir,
+                "outputdir": effective_output_dir,  # Use the determined output dir
                 "outputformat": output_format,
                 "collection": collection,
                 "overwrite": overwrite_mode,
@@ -600,48 +602,146 @@ def task_split_cue(
                 "ffprobe_cmd": ffprobe_path,
                 "prg_loglevel": FFCS_PROG_LOG_LEVEL,
                 "ffmpeg_loglevel": FFMPEG_LOG_LEVEL,
-                "progress_meter": "standard",  # No TQDM in GUI
+                "progress_meter": "standard",
                 "dry": False,
             }
             split_op = FileSystemOperations(**kwargs)
-            # Follow the library's example flow (even if overwrite is 'always')
-            overwr = split_op.check_for_overwriting()
-            if not overwr:  # Proceed if overwrite is allowed or not needed
-                split_op.work_on_temporary_directory()
-                split_successful = True  # Assume success if no exception
+            overwr = (
+                split_op.check_for_overwriting()
+            )  # Check destination based on kwargs
+            if not overwr:
+                split_op.work_on_temporary_directory()  # Library handles moving to final outputdir
+                split_successful = True
                 progress_callback("  Split command sequence executed.")
             else:
                 progress_callback(
                     f"  Skipped: Overwrite needed but not permitted (Overwrite mode: '{overwrite_mode}')."
                 )
                 skipped_count += 1
-                # Don't mark as fail, but don't cleanup
 
         except Exception as e_split:
-            progress_callback(f"  [!] Error during split execution: {e_split}")
+            progress_callback(
+                f"  [!] Error during split execution: {type(e_split).__name__} - {e_split}"
+            )
             fail_count += 1
-            split_successful = False  # Explicitly mark as failed
+            split_successful = False
+        # --- End of Step 2 ---
 
-        # 3. Cleanup if split was successful
+        # --- Start of Step 3: Cleanup (MODIFIED) ---
         if split_successful:
             success_count += 1
             progress_callback(f"  Split successful. Cleaning up original files...")
             files_to_delete = {os.path.normpath(cue_file)}
             files_to_delete.update(original_audio_files)
-            # Add log file with same base name as CUE
-            cue_base_name = os.path.splitext(cue_file)[0]
-            log_file_path = os.path.normpath(f"{cue_base_name}.log")
+
+            # Add log file with same base name as CUE, in the CUE's original directory
+            cue_base_name = os.path.splitext(os.path.basename(cue_file))[
+                0
+            ]  # Get base name without ext
+            log_file_path = os.path.normpath(
+                os.path.join(cue_dir, f"{cue_base_name}.log")
+            )  # Log in CUE dir
             if os.path.exists(log_file_path):
                 files_to_delete.add(log_file_path)
 
-            # Delete ffcuesplitter.log (usually in CWD, which might be script dir)
-            # Consider making its location configurable if problematic
-            ffcs_log = os.path.normpath("ffcuesplitter.log")
-            if os.path.exists(ffcs_log):
-                files_to_delete.add(ffcs_log)
+            # Delete ffcuesplitter.log from the effective output directory (where it's generated)
+            # Handle potential collection subdirectory structure as well
+            # Note: ffcuesplitter *should* handle its own log rotation/management ideally,
+            # but we explicitly delete it here as requested.
+
+            # Base path for the log file (without collection structure)
+            ffcs_log_base_path = os.path.join(effective_output_dir, "ffcuesplitter.log")
+
+            # Check if collection is used to adjust the path
+            ffcs_log_path = ffcs_log_base_path
+            if collection:
+                # We need to figure out the *actual* subdirs created.
+                # FileSystemOperations doesn't directly expose this easily after run.
+                # Simplest approach: Check the base output dir AND potential artist/album dirs.
+                # This isn't perfect but covers common cases.
+                potential_paths_to_check = {ffcs_log_base_path}
+                try:
+                    # Try to get artist/album from CUE info again for path guess
+                    # Re-use info_getter if still valid, or recreate minimally
+                    if "info_getter" not in locals():
+                        info_getter = FFCueSplitter(
+                            filename=cue_file, dry=True, prg_loglevel="error"
+                        )
+
+                    cd_info = info_getter.cue.meta.data
+                    artist = cd_info.get("PERFORMER", "")
+                    album = cd_info.get("ALBUM", "")
+
+                    # Sanitize artist/album names for path use (basic example)
+                    def sanitize(name):
+                        return "".join(
+                            c for c in name if c.isalnum() or c in (" ", "_", "-")
+                        ).rstrip()
+
+                    sanitized_artist = sanitize(artist)
+                    sanitized_album = sanitize(album)
+
+                    if collection == "artist" and sanitized_artist:
+                        potential_paths_to_check.add(
+                            os.path.join(
+                                effective_output_dir,
+                                sanitized_artist,
+                                "ffcuesplitter.log",
+                            )
+                        )
+                    elif collection == "album" and sanitized_album:
+                        potential_paths_to_check.add(
+                            os.path.join(
+                                effective_output_dir,
+                                sanitized_album,
+                                "ffcuesplitter.log",
+                            )
+                        )
+                    elif (
+                        collection == "artist+album"
+                        and sanitized_artist
+                        and sanitized_album
+                    ):
+                        potential_paths_to_check.add(
+                            os.path.join(
+                                effective_output_dir,
+                                sanitized_artist,
+                                sanitized_album,
+                                "ffcuesplitter.log",
+                            )
+                        )
+
+                except Exception as e_path:
+                    progress_callback(
+                        f"  [!] Warning: Could not determine exact collection path for ffcuesplitter.log cleanup: {e_path}"
+                    )
+
+                # Check all potential paths
+                found_ffcs_log = False
+                for potential_path in potential_paths_to_check:
+                    norm_potential_path = os.path.normpath(potential_path)
+                    if os.path.exists(norm_potential_path):
+                        files_to_delete.add(norm_potential_path)
+                        found_ffcs_log = True
+                        # Assume only one log location exists per run
+                        break
+                if not found_ffcs_log:
+                    progress_callback(
+                        f"  Note: ffcuesplitter.log not found in expected output location(s) for cleanup."
+                    )
+
+            else:  # No collection used
+                norm_ffcs_log_path = os.path.normpath(ffcs_log_path)
+                if os.path.exists(norm_ffcs_log_path):
+                    files_to_delete.add(norm_ffcs_log_path)
+                else:
+                    progress_callback(
+                        f"  Note: ffcuesplitter.log not found in output directory ({effective_output_dir}) for cleanup."
+                    )
 
             for file_to_del in files_to_delete:
-                safe_delete(file_to_del, progress_callback)  # Use safe delete util
+                safe_delete(file_to_del, progress_callback)
+        # --- End of Step 3 ---
 
     # --- Final Summary ---
     summary = (
@@ -651,5 +751,5 @@ def task_split_cue(
         f"Failed: {fail_count}\n"
         f"Skipped (Overwrite): {skipped_count}"
     )
-    overall_success = fail_count == 0  # Consider successful if no hard failures
+    overall_success = fail_count == 0
     return overall_success, summary
