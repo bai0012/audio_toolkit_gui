@@ -3,9 +3,9 @@
 import os
 from typing import List, Optional
 
-from PyQt5.QtWidgets import QLineEdit, QListWidget, QAbstractItemView
-from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent
+from PyQt5.QtWidgets import QLineEdit, QListWidget, QAbstractItemView
 
 # Import the scanner from utils
 from utils import _scan_folder_recursive

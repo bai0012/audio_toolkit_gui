@@ -1,10 +1,12 @@
 # audio_toolkit/main_app.py
 
-import sys
-import os
 import functools
-from typing import List, Dict
+import os
+import sys
+from typing import List
 
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QFont, QPalette, QColor
 from PyQt5.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -26,24 +28,7 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QCheckBox,  # Added ComboBox, CheckBox
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QPalette, QColor, QIcon
 
-# Import local modules
-from ui_widgets import DropLineEdit, DropListWidget
-from worker_tasks import (
-    Worker,
-    task_add_covers,
-    task_convert_wav,
-    task_edit_metadata,
-    task_split_cue,
-)
-from utils import (
-    log_message,
-    find_ffmpeg,
-    _scan_folder_recursive,
-    find_ffprobe,
-)  # Import necessary utils
 from constants import (  # Import necessary constants
     AUDIO_META_EXTENSIONS,
     AUDIO_WAV_EXTENSIONS,
@@ -56,6 +41,22 @@ from constants import (  # Import necessary constants
     CUE_OUTPUT_FORMATS,
     CUE_COLLECTION_OPTS,
     CUE_OVERWRITE_MODES,
+)
+
+# Import local modules
+from ui_widgets import DropLineEdit, DropListWidget
+from utils import (
+    log_message,
+    find_ffmpeg,
+    _scan_folder_recursive,
+    find_ffprobe,
+)  # Import necessary utils
+from worker_tasks import (
+    Worker,
+    task_add_covers,
+    task_convert_wav,
+    task_edit_metadata,
+    task_split_cue,
 )
 
 

@@ -1,13 +1,21 @@
 # audio_toolkit/worker_tasks.py
 
 import os
-import sys
+from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse
+
 import mutagen
 import requests
-from urllib.parse import urlparse
-from typing import List, Dict, Any, Optional
+from PyQt5.QtCore import QObject, pyqtSignal
 
-from PyQt5.QtCore import QObject, pyqtSignal, QThread
+# Import constants
+from constants import (
+    IMAGE_EXTENSIONS,
+    VALID_MIME_TYPES,
+    EDITABLE_TAGS_LOWER,
+    FFMPEG_LOG_LEVEL,
+    FFCS_PROG_LOG_LEVEL,
+)
 
 # Import helpers from utils
 from utils import (  # Ensure safe_delete is imported
@@ -15,17 +23,6 @@ from utils import (  # Ensure safe_delete is imported
     find_ffprobe,
     run_ffmpeg_command,
     safe_delete,
-)
-
-# Import constants
-from constants import (
-    IMAGE_EXTENSIONS,
-    VALID_MIME_TYPES,
-    EDITABLE_TAGS_LOWER,
-    CUE_EXTENSIONS,
-    FFMPEG_LOG_LEVEL,
-    FFPROBE_LOG_LEVEL,
-    FFCS_PROG_LOG_LEVEL,
 )
 
 
