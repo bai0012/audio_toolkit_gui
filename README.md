@@ -120,7 +120,6 @@ If you would like to contribute, please feel free to fork the repository, create
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-*(You might need to create a LICENSE file in your repository if you haven't already)*
 
 ## Acknowledgements
 
