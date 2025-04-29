@@ -1,12 +1,14 @@
 # audio_toolkit/worker_tasks.py
 
 import os
+import re
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
 
 import mutagen
 import requests
 from PyQt5.QtCore import QObject, pyqtSignal
+from vgmdb_scraper import scrape_vgmdb_album, _parse_date, _get_preferred_lang
 
 # Import constants
 from constants import (
@@ -30,43 +32,30 @@ from utils import (  # Ensure safe_delete is imported
 class Worker(QObject):
     """Generic worker thread for running tasks."""
 
-    finished = pyqtSignal(bool, str)  # Signal(success_bool, message_str)
-    progress = pyqtSignal(str)  # Signal(progress_message_str)
+    finished = pyqtSignal(bool, object) # Signal(success_bool, result_object)
+    progress = pyqtSignal(str)
 
     def __init__(self, task_func, *args, **kwargs):
         super().__init__()
         self.task_func = task_func
         self.args = args
         self.kwargs = kwargs
-        # Store logger reference from main app if passed
-        self.logger = kwargs.pop(
-            "logger_func", print
-        )  # Default to print if no logger passed
+        self.logger = kwargs.pop('logger_func', print)
 
     def run(self):
         try:
-            # Pass the progress signal emitter (which uses the logger) to the task
-            result, message = self.task_func(
-                self.progress.emit, *self.args, **self.kwargs
-            )
-            self.finished.emit(result, message)
+            # Task function now returns (bool, Any)
+            result, message_or_data = self.task_func(self.progress.emit, *self.args, **self.kwargs)
+            self.finished.emit(result, message_or_data)  # Emit the actual result object
         except ImportError as e:
-            # Specific handling for missing libraries like ffcuesplitter
             self.logger(f"[!] Worker thread error: Required library missing - {e}")
-            self.finished.emit(
-                False,
-                f"Worker thread error: Required library missing.\nPlease ensure '{e.name}' is installed (`pip install {e.name}`).",
-            )
+            self.finished.emit(False,
+                               f"Worker thread error: Required library missing.\nPlease ensure '{e.name}' is installed (`pip install {e.name}`).")
         except Exception as e:
-            self.logger(
-                f"[!] Worker thread error: {type(e).__name__} - {str(e)}"
-            )  # Log exception type and msg
-            # Optionally include traceback for debugging (might be too verbose for user)
-            # import traceback
-            # self.logger(traceback.format_exc())
-            self.finished.emit(
-                False, f"Worker thread error: {type(e).__name__} - {str(e)}"
-            )
+            self.logger(f"[!] Worker thread error: {type(e).__name__} - {str(e)}")
+            import traceback
+            self.logger(traceback.format_exc())  # Log traceback on unexpected errors
+            self.finished.emit(False, f"Worker thread error: {type(e).__name__} - {str(e)}")  # Emit error string
 
 
 # --- Task Functions ---
@@ -750,3 +739,47 @@ def task_split_cue(
     )
     overall_success = fail_count == 0
     return overall_success, summary
+
+def task_fetch_vgmdb(progress_callback, album_id: str):
+    """
+    Worker task to fetch album data from VGMdb.
+
+    Args:
+        progress_callback (callable): Function to report progress/log messages.
+        album_id (str): The VGMdb album ID.
+
+    Returns:
+        tuple: (bool success, dict data or str error_message)
+    """
+    progress_callback(f"Starting VGMdb fetch for ID: {album_id}")
+
+    # Ensure album_id is just the number string
+    match = re.match(r'\d+', str(album_id))
+    if not match:
+        msg = f"Invalid VGMdb Album ID format: '{album_id}'. Should be numbers only."
+        progress_callback(f"[!] {msg}")
+        return False, msg
+    cleaned_album_id = match.group(0)
+
+    try:
+        # Call the scraper function, passing our progress_callback as the logger
+        scraped_data = scrape_vgmdb_album(cleaned_album_id, progress_callback)
+
+        if not scraped_data:
+            msg = "Scraper returned no data (check network/ID)."
+            progress_callback(f"[!] {msg}")
+            return False, msg
+        elif scraped_data.get("_error"):
+             msg = f"Scraping failed: {scraped_data['_error']}"
+             progress_callback(f"[!] {msg}")
+             # Return the partial data anyway so user can see what was found
+             return False, scraped_data # Return data dict even on error for inspection
+        else:
+             progress_callback(f"Successfully fetched data for VGMdb ID {cleaned_album_id}.")
+             return True, scraped_data # Return the full dictionary on success
+
+    except Exception as e:
+        progress_callback(f"[!] Unexpected error during VGMdb fetch: {type(e).__name__} - {e}")
+        import traceback
+        progress_callback(traceback.format_exc()) # Log full traceback for debugging
+        return False, f"Unexpected error: {e}"
