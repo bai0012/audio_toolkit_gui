@@ -9,17 +9,20 @@ CUE_EXTENSIONS = [".cue"]
 
 # --- Metadata Editor Constants ---
 EDITABLE_TAGS = {
-    "artist": "Artist",
-    "albumartist": "Album Artist",
-    "album": "Album",
-    "genre": "Genre",
-    "date": "Year/Date (YYYY or YYYY-MM-DD)",
-    "tracknumber": "Track Number (e.g., 5 or 5/12)",
-    "discnumber": "Disc Number (e.g., 1 or 1/2)",
-    "composer": "Composer",
-    "comment": "Comment",
+    'title': 'Title',
+    'artist': 'Artist',
+    'albumartist': 'Album Artist',
+    'album': 'Album',
+    'genre': 'Genre',
+    'year': 'Year (YYYY)', # Add Year field
+    'date': 'Date (YYYY-MM-DD)', # Keep Date field distinct
+    'tracknumber': 'Track Number (e.g., 5/12)',
+    'discnumber': 'Disc Number (e.g., 1/2)',
+    'composer': 'Composer',
+    'comment': 'Comment',
 }
 EDITABLE_TAGS_LOWER = {k.lower(): v for k, v in EDITABLE_TAGS.items()}
+
 CLEAR_TAG_PLACEHOLDER = "__CLEAR_THIS_TAG__"
 CLEAR_TAG_DISPLAY_TEXT = "<Marked for Clearing>"
 MULTIPLE_VALUES_PLACEHOLDER = "<Multiple Values>"

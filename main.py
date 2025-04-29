@@ -342,72 +342,87 @@ class AudioToolApp(QMainWindow):
 
     # --- Child Widget Setup ---
     def _setup_current_meta_display(self):
-        # (Unchanged from previous version, ensure imports correct)
+        # Clear previous labels
         for label in self.current_meta_labels.values():
             label.deleteLater()
         self.current_meta_labels = {}
         while self.current_meta_layout.count():
             child = self.current_meta_layout.takeAt(0)
             widget = child.widget()
-            widget and widget.deleteLater()
-        title_label = QLabel("-")
-        title_label.setWordWrap(True)
-        self.current_meta_layout.addRow("Title:", title_label)
-        self.current_meta_labels["title"] = title_label
-        for key, display_name in EDITABLE_TAGS_LOWER.items():
+            if widget: widget.deleteLater()
+
+        # Add display rows based on EDITABLE_TAGS_LOWER order + cover art
+        # Use the display names from the original EDITABLE_TAGS for labels
+        from constants import EDITABLE_TAGS  # Import temporarily for display names
+        for key, display_name in EDITABLE_TAGS.items():  # Iterate using original dict for order/casing
+            l_key = key.lower()
             value_label = QLabel("-")
             value_label.setWordWrap(True)
+            # Use display_name (potentially with format hint) for the label
             self.current_meta_layout.addRow(f"{display_name}:", value_label)
-            self.current_meta_labels[key] = value_label
+            self.current_meta_labels[l_key] = value_label  # Store using lower key
+
+        # Add cover art info separately
         cover_label = QLabel("-")
         self.current_meta_layout.addRow("Cover Art:", cover_label)
-        self.current_meta_labels["cover_art"] = cover_label
+        self.current_meta_labels['cover_art'] = cover_label
 
     def _setup_edit_meta_inputs(self):
-        # (Unchanged from previous version, ensure imports correct)
+        # Clear previous widgets
         for key in list(self.edit_meta_inputs.keys()):
-            self.edit_meta_inputs[key].deleteLater()
-            self.edit_meta_clear_buttons[key].deleteLater()
-            del self.edit_meta_inputs[key]
-            del self.edit_meta_clear_buttons[key]
+            if key in self.edit_meta_inputs: self.edit_meta_inputs[key].deleteLater()
+            if key in self.edit_meta_clear_buttons: self.edit_meta_clear_buttons[key].deleteLater()
+            # Assuming label was part of a layout that gets cleared
+            if key in self.edit_meta_inputs: del self.edit_meta_inputs[key]
+            if key in self.edit_meta_clear_buttons: del self.edit_meta_clear_buttons[key]
+
         while self.edit_meta_v_layout.count():
             item = self.edit_meta_v_layout.takeAt(0)
             widget = item.widget()
             layout = item.layout()
-            if widget:
-                widget.deleteLater()
-            if layout:
+            if widget: widget.deleteLater()
+            if layout:  # Recursively delete layout contents
                 while layout.count():
                     sub_item = layout.takeAt(0)
                     sub_widget = sub_item.widget()
-                    sub_widget and sub_widget.deleteLater()
-                    layout.deleteLater()
-        for key, display_name in EDITABLE_TAGS_LOWER.items():
+                    if sub_widget: sub_widget.deleteLater()
+                layout.deleteLater()
+
+        self.edit_meta_inputs = {}  # Reset dictionaries
+        self.edit_meta_clear_buttons = {}
+
+        # Create input fields based on EDITABLE_TAGS_LOWER order
+        from constants import EDITABLE_TAGS  # Import temporarily for display names
+        for key, display_name in EDITABLE_TAGS.items():  # Iterate using original dict for order/casing
+            l_key = key.lower()
             row_layout = QHBoxLayout()
+
+            # Use display_name (potentially with format hint) for the label
             label = QLabel(f"{display_name}:")
-            label.setMinimumWidth(100)
+            label.setMinimumWidth(100)  # Ensure alignment
             label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
             input_widget = QLineEdit()
             input_widget.setPlaceholderText("Leave unchanged or enter new value")
             input_widget.setProperty("originalValue", "")
-            input_widget.textChanged.connect(
-                functools.partial(self._reset_clear_visual_state, input_widget)
-            )
+            input_widget.textChanged.connect(functools.partial(self._reset_clear_visual_state, input_widget))
+
             clear_button = QPushButton("Clear")
             clear_button.setFixedWidth(50)
             clear_button.setToolTip(f"Mark '{display_name}' to be cleared/removed")
-            clear_button.clicked.connect(
-                functools.partial(self._handle_clear_button_click, key)
-            )
+            clear_button.clicked.connect(functools.partial(self._handle_clear_button_click, l_key))  # Pass lower key
+
             row_layout.addWidget(label)
             row_layout.addWidget(input_widget)
             row_layout.addWidget(clear_button)
+
             self.edit_meta_v_layout.addLayout(row_layout)
-            self.edit_meta_inputs[key] = input_widget
-            self.edit_meta_clear_buttons[key] = clear_button
+            self.edit_meta_inputs[l_key] = input_widget  # Store using lower key
+            self.edit_meta_clear_buttons[l_key] = clear_button  # Store using lower key
+
+        # Add a helper label at the bottom
         help_label = QLabel(
-            "<small><i>Edit fields show common value for multiple selections. Enter new value to change.\nUse 'Clear' button to remove a tag. Empty fields are ignored if not cleared.</i></small>"
-        )
+            "<small><i>Edit fields show common value for multiple selections. Enter new value to change.\nUse 'Clear' button to remove a tag. Empty fields are ignored if not cleared.</i></small>")
         help_label.setWordWrap(True)
         self.edit_meta_v_layout.addWidget(help_label)
 
