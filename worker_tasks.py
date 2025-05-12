@@ -4,6 +4,7 @@ import os
 import re
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
+from venv import logger
 
 import mutagen
 import requests
@@ -32,7 +33,7 @@ from utils import (  # Ensure safe_delete is imported
 class Worker(QObject):
     """Generic worker thread for running tasks."""
 
-    finished = pyqtSignal(bool, object) # Signal(success_bool, result_object)
+    finished = pyqtSignal(bool, object)  # Signal(success_bool, result_object)
     progress = pyqtSignal(str)
 
     def __init__(self, task_func, *args, **kwargs):
@@ -40,27 +41,34 @@ class Worker(QObject):
         self.task_func = task_func
         self.args = args
         self.kwargs = kwargs
-        self.logger = kwargs.pop('logger_func', print)
+        self.logger = kwargs.pop("logger_func", print)
 
     def run(self):
         try:
             # Task function now returns (bool, Any)
-            result, message_or_data = self.task_func(self.progress.emit, *self.args, **self.kwargs)
+            result, message_or_data = self.task_func(
+                self.progress.emit, *self.args, **self.kwargs
+            )
             self.finished.emit(result, message_or_data)  # Emit the actual result object
         except ImportError as e:
             self.logger(f"[!] Worker thread error: Required library missing - {e}")
-            self.finished.emit(False,
-                               f"Worker thread error: Required library missing.\nPlease ensure '{e.name}' is installed (`pip install {e.name}`).")
+            self.finished.emit(
+                False,
+                f"Worker thread error: Required library missing.\nPlease ensure '{e.name}' is installed (`pip install {e.name}`).",
+            )
         except Exception as e:
             self.logger(f"[!] Worker thread error: {type(e).__name__} - {str(e)}")
             import traceback
+
             self.logger(traceback.format_exc())  # Log traceback on unexpected errors
-            self.finished.emit(False, f"Worker thread error: {type(e).__name__} - {str(e)}")  # Emit error string
+            self.finished.emit(
+                False, f"Worker thread error: {type(e).__name__} - {str(e)}"
+            )  # Emit error string
 
 
 # --- Task Functions ---
 
-# (Existing task_add_covers, task_convert_wav, task_edit_metadata need slight mods
+# (Existing task_convert_wav, task_edit_metadata need slight mods
 #  to use the logger correctly if they call helper functions that need it,
 #  and import helpers/constants from new locations)
 
@@ -72,22 +80,61 @@ def get_metadata(file_path: str, logger) -> Dict[str, Any]:
     try:
         audio = mutagen.File(file_path, easy=True)
         if audio is None:
-            return {"error": "Unsupported format or read error"}
-        for key in EDITABLE_TAGS_LOWER:
-            metadata[key] = "; ".join(audio[key]) if key in audio else ""
-        metadata["title"] = "; ".join(audio["title"]) if "title" in audio else ""
+            # Try again without easy=True for formats it might not support directly
+            audio_raw = mutagen.File(file_path)
+            if audio_raw is None:
+                return {"error": "Unsupported format or read error"}
+            # If raw loading worked but easy didn't, populate common tags manually if possible
+            # This is a basic example, might need format-specific handling
+            metadata["title"] = (
+                str(audio_raw.get("TIT2", [""])[0]) if hasattr(audio_raw, "get") else ""
+            )
+            metadata["artist"] = (
+                str(audio_raw.get("TPE1", [""])[0]) if hasattr(audio_raw, "get") else ""
+            )
+            metadata["album"] = (
+                str(audio_raw.get("TALB", [""])[0]) if hasattr(audio_raw, "get") else ""
+            )
+            # Add more tags as needed...
+            for key in EDITABLE_TAGS_LOWER:
+                if key not in metadata:
+                    metadata[key] = ""  # Ensure all keys exist
+        else:
+            # easy=True worked, proceed as before
+            for key in EDITABLE_TAGS_LOWER:
+                metadata[key] = "; ".join(audio[key]) if key in audio else ""
+            metadata["title"] = "; ".join(audio["title"]) if "title" in audio else ""
+
+        # Cover art check (remains the same logic)
         cover_info = "No"
         try:
-            audio_raw = mutagen.File(file_path)
+            audio_raw = mutagen.File(
+                file_path
+            )  # Need raw file access for pictures/APIC
             if isinstance(audio_raw, mutagen.flac.FLAC) and audio_raw.pictures:
                 cover_info = f"Yes ({len(audio_raw.pictures)} image(s))"
             elif isinstance(audio_raw, mutagen.mp3.MP3) and any(
                 tag.startswith("APIC") for tag in audio_raw.tags.keys()
             ):
                 cover_info = "Yes"
+            # Add checks for other formats if needed (e.g., M4A, Ogg Vorbis)
+            elif isinstance(audio_raw, mutagen.mp4.MP4) and "covr" in audio_raw.tags:
+                cover_info = "Yes"
+            elif (
+                isinstance(audio_raw, mutagen.oggvorbis.OggVorbis)
+                and "metadata_block_picture" in audio_raw.tags
+            ):
+                cover_info = "Yes"
+
             metadata["cover_art"] = cover_info
-        except Exception:
-            metadata["cover_art"] = "N/A"
+        except Exception as e_cover:
+            # Don't overwrite existing metadata if only cover check fails
+            if "cover_art" not in metadata:
+                metadata["cover_art"] = "N/A"
+            logger(
+                f"  Warning: Could not check cover art for {os.path.basename(file_path)}: {e_cover}"
+            )
+
     except mutagen.id3.ID3NoHeaderError:
         logger(f"  Warning: No ID3 header found in MP3: {os.path.basename(file_path)}")
         metadata = {k: "" for k in EDITABLE_TAGS_LOWER}
@@ -96,6 +143,9 @@ def get_metadata(file_path: str, logger) -> Dict[str, Any]:
         metadata["error"] = "No ID3 Header"
     except Exception as e:
         logger(f"  Error reading metadata for {os.path.basename(file_path)}: {e}")
+        metadata = {k: "" for k in EDITABLE_TAGS_LOWER}  # Default empty on error
+        metadata["title"] = ""
+        metadata["cover_art"] = "N/A"
         metadata["error"] = str(e)
     return metadata
 
@@ -104,71 +154,92 @@ def update_metadata(file_path: str, metadata_updates: Dict[str, str], logger) ->
     # (Code from previous version, ensure imports/constants are correct)
     logger(f"Updating metadata for: {os.path.basename(file_path)}")
     try:
-        audio = mutagen.File(file_path)  # Use non-easy for tag check/delete potentially
-        if audio is None:
-            logger(f"  [!] Cannot load file: {os.path.basename(file_path)}")
-            return False
-        if audio.tags is None:
-            try:
-                logger(f"  [*] Adding tags structure...")
-                audio.add_tags()
-                audio.save()
-                audio = mutagen.File(file_path)
-            except Exception as e_add:
-                logger(f"  [!] Error adding tags structure: {e_add}")
+        # Try easy mode first, common for MP3/FLAC/M4A etc.
+        audio = mutagen.File(file_path, easy=True)
+        if audio is None or audio.tags is None:
+            # If easy mode fails or no tags, try loading raw and adding tags
+            logger(
+                f"  [*] File type may not support easy tags or tags missing. Trying raw mode."
+            )
+            audio_raw = mutagen.File(file_path)
+            if audio_raw is None:
+                logger(f"  [!] Cannot load file: {os.path.basename(file_path)}")
                 return False
-            if audio.tags is None:
-                logger(f"  [!] Failed to add tags structure.")
-                return False
+            if audio_raw.tags is None:
+                try:
+                    logger(f"  [*] Adding tags structure...")
+                    audio_raw.add_tags()
+                    audio_raw.save()
+                    # Reload in easy mode if possible after adding tags
+                    audio = mutagen.File(file_path, easy=True)
+                    if audio is None or audio.tags is None:
+                        logger(
+                            "  [*] Tags added, but easy mode still unavailable. Update might fail."
+                        )
+                        # Fallback: attempt to use raw object if easy still fails
+                        # This part gets complex as tag names differ (e.g., TPE1 vs artist)
+                        # For now, we'll primarily rely on easy=True working after add_tags
+                        # or for formats that support it initially.
+                        return False  # Simplification: If easy mode doesn't work, report failure for now.
+                except Exception as e_add:
+                    logger(f"  [!] Error adding tags structure: {e_add}")
+                    return False
+            else:
+                # Tags exist, but easy mode failed. This is less common.
+                logger(
+                    "  [*] Tags structure exists, but easy mode failed. Update might fail."
+                )
+                return False  # Simplification for now.
 
-        audio_easy = mutagen.File(file_path, easy=True)  # Use easy for setting values
-        if audio_easy is None or audio_easy.tags is None:
-            logger(f"  [!] Could not reopen file in easy mode.")
-            return False
+        # Proceed with easy tags object
+        audio_easy = audio  # Use the successfully loaded object
 
         needs_save = False
         updated_count = 0
         deleted_count = 0
         for key, value in metadata_updates.items():
             l_key = key.lower()
+            # Use the mapping from constants to get the display name
+            display_key = EDITABLE_TAGS_LOWER.get(l_key, l_key)
+
             if l_key not in EDITABLE_TAGS_LOWER:
                 continue
+
             current_value_str = (
                 "; ".join(audio_easy[l_key]) if l_key in audio_easy else ""
             )
+
             if value == "":  # Delete request
                 if l_key in audio_easy:
                     try:
                         del audio_easy[l_key]
-                        logger(
-                            f"      - Deleted tag {EDITABLE_TAGS_LOWER.get(l_key, l_key)}"
-                        )
+                        logger(f"      - Deleted tag {display_key}")
                         needs_save = True
                         deleted_count += 1
                     except Exception as e_del:
-                        logger(f"      - Failed to delete tag {l_key}: {e_del}")
+                        logger(f"      - Failed to delete tag {display_key}: {e_del}")
             elif value != current_value_str:  # Update request
                 try:
+                    # Split value by semicolon, strip whitespace, filter empty strings
                     new_value_list = [v.strip() for v in value.split(";") if v.strip()]
                     if new_value_list:
                         audio_easy[l_key] = new_value_list
-                        logger(
-                            f"      - Set {EDITABLE_TAGS_LOWER.get(l_key, l_key)} = '{value}'"
-                        )
+                        logger(f"      - Set {display_key} = '{value}'")
                         needs_save = True
                         updated_count += 1
-                    elif l_key in audio_easy:
+                    elif (
+                        l_key in audio_easy
+                    ):  # New value is empty string after stripping/splitting
                         del audio_easy[l_key]
-                        logger(
-                            f"      - Deleted tag {EDITABLE_TAGS_LOWER.get(l_key, l_key)} (new value empty)"
-                        )
+                        logger(f"      - Deleted tag {display_key} (new value empty)")
                         needs_save = True
                         deleted_count += 1
                 except Exception as e_set:
-                    logger(f"  [!] Error setting tag '{l_key}': {e_set}")
+                    logger(f"  [!] Error setting tag '{display_key}': {e_set}")
 
         if needs_save:
             try:
+                # Use the 'audio_easy' object which holds the changes
                 audio_easy.save()
                 logger(
                     f"      - Saved changes. ({updated_count} updated, {deleted_count} deleted)"
@@ -184,6 +255,9 @@ def update_metadata(file_path: str, metadata_updates: Dict[str, str], logger) ->
             return True
     except Exception as e:
         logger(f"  [!] Error processing file {os.path.basename(file_path)}: {e}")
+        import traceback
+
+        logger(traceback.format_exc())
         return False
 
 
@@ -208,7 +282,12 @@ def download_cover(url: str, save_dir: str, logger, timeout: int = 10) -> Option
                 ext = path_ext
                 logger(f"  Guessed extension from URL: {ext}")
             else:
-                raise ValueError(f"Unsupported image type: {content_type} / {path_ext}")
+                # Allow download even if type unknown, maybe ffmpeg can handle it
+                ext = path_ext if path_ext else "jpg"  # Default guess if no ext
+                logger(
+                    f"  [!] Warning: Unsupported or ambiguous image type '{content_type}' / '{path_ext}'. Attempting download as '.{ext}'."
+                )
+                # raise ValueError(f"Unsupported image type: {content_type} / {path_ext}") # Don't raise, just warn
         else:
             ext = VALID_MIME_TYPES[content_type]
         temp_cover_path = os.path.join(save_dir, f"cover_download_temp.{ext}")
@@ -225,7 +304,7 @@ def download_cover(url: str, save_dir: str, logger, timeout: int = 10) -> Option
     except requests.exceptions.RequestException as e:
         logger(f"  [!] Download failed: {url} -> {str(e)}")
         return None
-    except ValueError as e:
+    except ValueError as e:  # Keep this for actual ValueErrors if we add checks back
         logger(f"  [!] Download failed: {str(e)}")
         return None
     except Exception as e:
@@ -241,78 +320,130 @@ def find_local_cover(directory: str, logger) -> Optional[str]:
         if os.path.isfile(cover_path):
             logger(f"  Found local cover: {cover_path}")
             return cover_path
+        # Check for 'folder.ext' as well, common convention
+        folder_cover_path = os.path.join(directory, f"folder.{ext}")
+        if os.path.isfile(folder_cover_path):
+            logger(f"  Found local cover: {folder_cover_path}")
+            return folder_cover_path
     # logger("  No local cover file found.")
     return None
 
 
-def process_flac_file_add_cover(flac_path: str, cover_image_path: str, logger) -> bool:
-    # (Code from previous version, ensure imports/utils are correct)
-    logger(f"Processing (Add Cover): {os.path.basename(flac_path)}")
-    temp_output = f"{os.path.splitext(flac_path)[0]}.tmp_cover.flac"
+# --- MODIFIED: Renamed and generalized function ---
+def process_audio_file_add_cover(
+    audio_path: str, cover_image_path: str, logger
+) -> bool:
+    """
+    Embeds a cover image into an audio file (FLAC or MP3) using FFmpeg.
+    Overwrites the original file on success.
+    """
+    logger(f"Processing (Add Cover): {os.path.basename(audio_path)}")
+    base, ext = os.path.splitext(audio_path)
+    # Ensure the temporary file has the correct extension for FFmpeg to work correctly
+    temp_output = f"{base}.tmp_cover{ext}"
+
     ffmpeg_path = find_ffmpeg()
     if not ffmpeg_path:
         logger("  [!] FFmpeg not found. Cannot process file.")
         return False
+
+    # This FFmpeg command works for embedding covers in both FLAC and MP3.
+    # - For FLAC, it creates a FLAC picture block.
+    # - For MP3, it creates an ID3v2 APIC frame.
+    # - '-c copy' copies the audio stream without re-encoding.
+    # - '-map 0:a' ensures only the audio stream from the original is mapped.
+    # - '-map 1' maps the entire image file (input 1) as a new stream.
+    # - '-map_metadata 0' copies metadata from the original audio file.
+    # - '-disposition:v attached_pic' marks the image stream appropriately.
     cmd = [
         ffmpeg_path,
         "-i",
-        flac_path,
+        audio_path,  # Input 0: Audio file
         "-i",
-        cover_image_path,
+        cover_image_path,  # Input 1: Cover image
         "-map",
-        "0:a",
+        "0:a",  # Map audio stream from input 0
         "-map",
-        "1",
+        "1",  # Map image stream from input 1
         "-c",
-        "copy",
+        "copy",  # Copy audio stream, copy image stream (as appropriate tag/block)
         "-map_metadata",
-        "0",
+        "0",  # Copy metadata from input 0 (the audio file)
+        # Metadata for the *image stream itself*. More relevant for FLAC but harmless for MP3.
         "-metadata:s:v",
         "title=Album cover",
         "-metadata:s:v",
         "comment=Cover (front)",
         "-disposition:v",
-        "attached_pic",
-        "-y",
+        "attached_pic",  # Mark the video/image stream as an attached picture
+        "-y",  # Overwrite temporary output file if it exists
+        "-loglevel",
+        FFMPEG_LOG_LEVEL,  # Use configured log level
         temp_output,
     ]
+
     success = run_ffmpeg_command(cmd, logger)  # Pass logger
+
     if success:
         try:
-            os.replace(temp_output, flac_path)
-            logger(f"  Successfully embedded cover in: {os.path.basename(flac_path)}")
+            # Verify the temp file exists before attempting replace
+            if not os.path.exists(temp_output):
+                logger(
+                    f"  [!] Error: FFmpeg reported success, but output file '{os.path.basename(temp_output)}' not found."
+                )
+                return False
+            # Replace the original file with the new one
+            os.replace(temp_output, audio_path)
+            logger(f"  Successfully embedded cover in: {os.path.basename(audio_path)}")
             return True
         except Exception as e:
-            logger(f"  [!] Error replacing original file: {str(e)}")
+            logger(
+                f"  [!] Error replacing original file '{os.path.basename(audio_path)}' with temp file: {str(e)}"
+            )
+            # Attempt to clean up the temp file if replacement fails
+            safe_delete(temp_output, logger)
             return False
     else:
-        logger(f"  [!] Failed to process: {os.path.basename(flac_path)}")
-    # Cleanup failed temp file
-    if os.path.exists(temp_output):
-        safe_delete(temp_output, logger)
-    return False
+        logger(f"  [!] FFmpeg failed to process: {os.path.basename(audio_path)}")
+        # Cleanup failed temp file
+        if os.path.exists(temp_output):
+            safe_delete(temp_output, logger)
+        return False
 
 
 # --- Task Function Implementations ---
 
 
+# --- MODIFIED: task_add_covers now handles FLAC and MP3 ---
 def task_add_covers(progress_callback, folder_path, cover_url):
-    # (Code from previous version, ensure imports/utils/helpers are correct)
+    """
+    Worker task to find FLAC and MP3 files in a folder and embed covers.
+    Uses a remote URL or local 'cover.*' / 'folder.*' image.
+    """
     progress_callback(f"Starting cover embedding process for folder: {folder_path}")
     if cover_url:
         progress_callback(f"Will attempt to use remote cover: {cover_url}")
+
     files_processed, files_succeeded, files_failed, folders_skipped = 0, 0, 0, 0
-    all_flac_files = []
+    all_audio_files = []  # List to store all found audio files
+
     for root, dirs, files in os.walk(folder_path):
-        # progress_callback(f"Scanning directory: {root}") # Verbose
-        current_flac_files = [
-            os.path.join(root, f) for f in files if f.lower().endswith(".flac")
+        # Find both FLAC and MP3 files in the current directory
+        current_audio_files = [
+            os.path.join(root, f)
+            for f in files
+            if f.lower().endswith((".flac", ".mp3"))  # Check for both extensions
         ]
-        if not current_flac_files:
-            continue
-        all_flac_files.extend(current_flac_files)
-        # progress_callback(f"  Found {len(current_flac_files)} FLAC file(s) in {os.path.basename(root)}.") # Verbose
+
+        if not current_audio_files:
+            continue  # Skip directory if no relevant audio files found
+
+        all_audio_files.extend(current_audio_files)
+        # progress_callback(f"  Found {len(current_audio_files)} FLAC/MP3 file(s) in {os.path.basename(root)}.") # Verbose
+
         cover_to_use, downloaded_temp_cover = None, None
+
+        # 1. Try downloading cover if URL provided
         if cover_url:
             downloaded_temp_cover = download_cover(
                 cover_url, root, progress_callback
@@ -320,32 +451,66 @@ def task_add_covers(progress_callback, folder_path, cover_url):
             if downloaded_temp_cover:
                 cover_to_use = downloaded_temp_cover
                 progress_callback(
-                    f"  Using downloaded cover for: {os.path.basename(root)}"
+                    f"  Using downloaded cover for directory: {os.path.basename(root)}"
                 )
             # else: progress_callback("  Download failed. Checking local...") # Verbose
+
+        # 2. If no downloaded cover, look for local cover
         if not cover_to_use:
             local_cover = find_local_cover(root, progress_callback)  # Use helper
             if local_cover:
                 cover_to_use = local_cover
-                progress_callback(f"  Using local cover for: {os.path.basename(root)}")
+                progress_callback(
+                    f"  Using local cover for directory: {os.path.basename(root)}"
+                )
             else:
                 progress_callback(
                     f"  Skipping directory (no cover found/downloaded): {os.path.basename(root)}"
                 )
                 folders_skipped += 1
-                continue
-        for flac_path in current_flac_files:
+                # Must clean up temp download if it exists but wasn't used (e.g., local search failed after download)
+                if downloaded_temp_cover:
+                    safe_delete(downloaded_temp_cover, progress_callback)
+                continue  # Move to the next directory
+
+        # 3. Process all audio files in the current directory using the selected cover
+        for audio_path in current_audio_files:
             files_processed += 1
-            if process_flac_file_add_cover(flac_path, cover_to_use, progress_callback):
-                files_succeeded += 1  # Use helper
+            # Use the generalized processing function
+            if process_audio_file_add_cover(
+                audio_path, cover_to_use, progress_callback
+            ):
+                files_succeeded += 1
             else:
                 files_failed += 1
+
+        # 4. Clean up the temporary downloaded cover *after* processing all files in the directory
         if downloaded_temp_cover:
             safe_delete(downloaded_temp_cover, progress_callback)  # Use safe delete
-    if not all_flac_files:
-        return False, "No FLAC files found."
-    summary = f"Cover embedding finished.\nTotal FLAC files found: {len(all_flac_files)}\nFiles processed: {files_processed}\nSucceeded: {files_succeeded}, Failed: {files_failed}\nFolders skipped (no cover): {folders_skipped}"
-    return files_succeeded > 0 or files_failed == 0, summary
+
+    if not all_audio_files:
+        return (
+            False,
+            "No FLAC or MP3 files found in the selected folder.",
+        )  # Updated message
+
+    # Updated summary message
+    summary = (
+        f"Cover embedding finished.\n"
+        f"Total FLAC/MP3 files found: {len(all_audio_files)}\n"
+        f"Files processed: {files_processed}\n"
+        f"Succeeded: {files_succeeded}, Failed: {files_failed}\n"
+        f"Folders skipped (no cover): {folders_skipped}"
+    )
+
+    # Consider success if at least one file succeeded OR if no files failed (e.g., all skipped okay)
+    overall_success = (
+        files_succeeded > 0
+        or (files_processed > 0 and files_failed == 0)
+        or (files_processed == 0 and folders_skipped > 0 and files_failed == 0)
+    )
+
+    return overall_success, summary
 
 
 def task_convert_wav(progress_callback, wav_files: List[str], mode: str):
@@ -362,13 +527,15 @@ def task_convert_wav(progress_callback, wav_files: List[str], mode: str):
             logger(
                 f"  Skipping: FLAC file already exists: {os.path.basename(flac_path)}"
             )
-            return True
+            return True  # Count as success if already exists
         cmd = [
             ffmpeg_path,
             "-i",
             wav_path,
             "-c:a",
             "flac",
+            "-compression_level",  # Optional: Specify compression (e.g., 5 is default, 8 is higher)
+            "8",
             "-y",
             "-loglevel",
             FFMPEG_LOG_LEVEL,
@@ -380,6 +547,9 @@ def task_convert_wav(progress_callback, wav_files: List[str], mode: str):
             return True
         else:
             logger(f"  [!] Failed to convert: {os.path.basename(wav_path)}")
+            # Clean up potentially incomplete output file on failure
+            if os.path.exists(flac_path):
+                safe_delete(flac_path, logger)
             return False
 
     def convert_wav_to_flac_with_mp3_meta(wav_path: str, logger) -> bool:
@@ -396,30 +566,36 @@ def task_convert_wav(progress_callback, wav_files: List[str], mode: str):
             logger(
                 f"  Skipping: Corresponding MP3 not found: {os.path.basename(mp3_path)}"
             )
+            # This is not a failure of the *task*, just a skip condition. Return True? Or False?
+            # Let's return False as the conversion *didn't happen*. The summary counts failures.
             return False
         if os.path.exists(flac_path):
             logger(
                 f"  Skipping: FLAC file already exists: {os.path.basename(flac_path)}"
             )
-            return True
+            return True  # Count as success if already exists
+
+        # Command to convert WAV, copy metadata and *any* video streams (like cover art) from MP3
         cmd = [
             ffmpeg_path,
             "-i",
-            wav_path,
+            wav_path,  # Input 0: WAV
             "-i",
-            mp3_path,
+            mp3_path,  # Input 1: MP3
             "-map",
-            "0:a",
+            "0:a",  # Map audio from WAV (input 0)
             "-map",
-            "1:v?",
+            "1:v?",  # Map video stream(s) from MP3 if they exist (input 1, '?')
             "-map_metadata",
-            "1",
+            "1",  # Copy metadata from MP3 (input 1)
             "-c:a",
-            "flac",
+            "flac",  # Encode audio to FLAC
+            "-compression_level",
+            "8",  # Optional: specify compression
             "-c:v",
-            "copy",
-            "-disposition:v",
-            "attached_pic",
+            "copy",  # Copy video stream(s) (cover art) without re-encoding
+            # Ensure disposition is copied or set if needed (FFmpeg often handles this with map_metadata)
+            # '-disposition:v', 'attached_pic', # Usually not needed if copied correctly
             "-y",
             "-loglevel",
             FFMPEG_LOG_LEVEL,
@@ -428,38 +604,99 @@ def task_convert_wav(progress_callback, wav_files: List[str], mode: str):
         success = run_ffmpeg_command(cmd, logger)
         if success:
             logger(
-                f"  Successfully copied metadata and converted to: {os.path.basename(flac_path)}"
+                f"  Successfully copied metadata/cover and converted to: {os.path.basename(flac_path)}"
             )
             return True
         else:
             logger(
                 f"  [!] Failed to convert/copy metadata for: {os.path.basename(wav_path)}"
             )
+            # Clean up potentially incomplete output file on failure
+            if os.path.exists(flac_path):
+                safe_delete(flac_path, logger)
             return False
 
     # --- Main task logic ---
     progress_callback(f"Starting WAV conversion process ({mode})...")
-    files_processed, files_succeeded, files_failed = 0, 0, 0
+    files_processed, files_succeeded, files_failed, files_skipped = 0, 0, 0, 0
     if not wav_files:
         return False, "No WAV files selected."
-    for wav_path in wav_files:
+
+    total_files = len(wav_files)
+    for i, wav_path in enumerate(wav_files):
+        progress_callback(
+            f"Processing file {i+1}/{total_files}: {os.path.basename(wav_path)}"
+        )
         files_processed += 1
         success = False
+        skip = False  # Flag to differentiate skips from failures
+
         if mode == "simple":
-            success = convert_wav_to_flac_simple(wav_path, progress_callback)
+            # Check for existing FLAC before calling the convert function
+            flac_path_simple = f"{os.path.splitext(wav_path)[0]}.flac"
+            if os.path.exists(flac_path_simple):
+                logger(
+                    f"  Skipping: FLAC file already exists: {os.path.basename(flac_path_simple)}"
+                )
+                success = True  # Treat existing as success for summary
+                skip = True
+            else:
+                success = convert_wav_to_flac_simple(wav_path, progress_callback)
         elif mode == "mp3_meta":
-            success = convert_wav_to_flac_with_mp3_meta(wav_path, progress_callback)
+            # Check for existing FLAC and missing MP3 before calling convert function
+            base_name_meta = os.path.splitext(os.path.basename(wav_path))[0]
+            directory_meta = os.path.dirname(wav_path)
+            mp3_path_meta = os.path.join(directory_meta, f"{base_name_meta}.mp3")
+            flac_path_meta = os.path.join(directory_meta, f"{base_name_meta}.flac")
+
+            if os.path.exists(flac_path_meta):
+                logger(
+                    f"  Skipping: FLAC file already exists: {os.path.basename(flac_path_meta)}"
+                )
+                success = True  # Treat existing as success
+                skip = True
+            elif not os.path.exists(mp3_path_meta):
+                logger(
+                    f"  Skipping: Corresponding MP3 not found: {os.path.basename(mp3_path_meta)}"
+                )
+                success = False  # Conversion didn't happen, count as failure/skip? Let's count as skipped.
+                skip = True  # Explicitly mark as skipped
+            else:
+                success = convert_wav_to_flac_with_mp3_meta(wav_path, progress_callback)
         else:
             progress_callback(
                 f"  Skipping {os.path.basename(wav_path)}: Invalid mode '{mode}'"
             )
             success = False
-        if success:
+            skip = True  # Skipped due to invalid mode
+
+        if skip:
+            files_skipped += 1
+            # If we counted existing/skipped-no-mp3 as success=True for the overall task result,
+            # ensure it's also counted in succeeded stats if not skipped for other reasons.
+            if success:
+                files_succeeded += 1
+            else:
+                # If skip=True but success=False (e.g. skipped-no-mp3, invalid mode)
+                # We don't count it in failed, just skipped.
+                pass  # Only increment files_skipped
+        elif success:
             files_succeeded += 1
         else:
             files_failed += 1
-    summary = f"WAV conversion ({mode}) finished.\nFiles processed: {files_processed}\nSucceeded/Skipped(Exists): {files_succeeded}, Failed: {files_failed}"
-    return files_succeeded > 0 or files_failed == 0, summary
+
+    # Refined summary
+    summary = (
+        f"WAV conversion ({mode}) finished.\n"
+        f"Files processed: {files_processed}\n"
+        f"Succeeded: {files_succeeded}\n"
+        f"Skipped (Exists/No MP3/Invalid Mode): {files_skipped}\n"
+        f"Failed: {files_failed}"
+    )
+
+    # Success if no failures occurred, even if some were skipped
+    overall_success = files_failed == 0 and files_processed > 0
+    return overall_success, summary
 
 
 def task_edit_metadata(
@@ -472,18 +709,39 @@ def task_edit_metadata(
         return False, "No audio files selected."
     if not metadata_updates:
         return False, "No metadata changes specified."
+
+    # Log the changes being applied
     progress_callback(f"Applying changes to {len(file_paths)} file(s):")
+    change_list = []
     for key, value in metadata_updates.items():
+        # Use the display name from constants map
+        display_key = EDITABLE_TAGS_LOWER.get(key.lower(), key)
         action = f"'{value}'" if value else "[Clear Tag]"
-        progress_callback(f"  - {EDITABLE_TAGS_LOWER.get(key.lower(), key)}: {action}")
-    for file_path in file_paths:
+        change_list.append(f"  - {display_key}: {action}")
+    progress_callback("\n".join(change_list))
+
+    total_files = len(file_paths)
+    for i, file_path in enumerate(file_paths):
+        progress_callback(
+            f"\nProcessing file {i+1}/{total_files}: {os.path.basename(file_path)}"
+        )
         files_processed += 1
+        # Call the updated helper function
         if update_metadata(file_path, metadata_updates, progress_callback):
-            files_succeeded += 1  # Use helper
+            files_succeeded += 1
         else:
             files_failed += 1
-    summary = f"Metadata editing finished.\nFiles processed: {files_processed}\nSucceeded (or no changes needed): {files_succeeded}\nFailed: {files_failed}"
-    return files_succeeded > 0 or files_failed == 0, summary
+
+    summary = (
+        f"Metadata editing finished.\n"
+        f"Files processed: {files_processed}\n"
+        f"Succeeded (or no changes needed): {files_succeeded}\n"
+        f"Failed: {files_failed}"
+    )
+
+    # Success if no failures occurred
+    overall_success = files_failed == 0 and files_processed > 0
+    return overall_success, summary
 
 
 # --- NEW Task Function for CUE Splitting ---
@@ -512,13 +770,21 @@ def task_split_cue(
     ffmpeg_path = find_ffmpeg()
     ffprobe_path = find_ffprobe()
     if not ffmpeg_path or not ffprobe_path:
-        msg = f"[!] Error: {'FFmpeg' if not ffmpeg_path else ''}{' and ' if not ffmpeg_path and not ffprobe_path else ''}{'FFprobe' if not ffprobe_path else ''} not found in PATH."
+        missing = []
+        if not ffmpeg_path:
+            missing.append("FFmpeg")
+        if not ffprobe_path:
+            missing.append("FFprobe")
+        msg = f"[!] Error: { ' and '.join(missing) } not found in PATH or system environment."
         progress_callback(msg)
         return False, msg
 
-    for cue_file in cue_files:
+    total_files = len(cue_files)
+    for i, cue_file in enumerate(cue_files):
         processed_count += 1
-        progress_callback(f"\nProcessing CUE: {os.path.basename(cue_file)}")
+        progress_callback(
+            f"\nProcessing CUE {i+1}/{total_files}: {os.path.basename(cue_file)}"
+        )
         cue_dir = os.path.dirname(cue_file)
         # Determine where ffcuesplitter *will* output based on settings
         effective_output_dir = output_dir if output_dir else cue_dir
@@ -526,10 +792,13 @@ def task_split_cue(
         # --- Start of Step 1: Get Info ---
         original_audio_files = set()
         split_successful = False
+        info_getter = None  # Define scope outside try block
         try:
-            # ... (info getting logic remains the same) ...
+            # Instantiate once to get info
             info_getter = FFCueSplitter(
-                filename=cue_file, dry=True, prg_loglevel="error"
+                filename=cue_file,
+                dry=True,  # Don't split yet, just parse
+                prg_loglevel="error",  # Keep info gathering quiet
             )
             tracks = info_getter.audiotracks
             if not tracks:
@@ -539,15 +808,26 @@ def task_split_cue(
                 fail_count += 1
                 continue
 
+            # Find associated audio file(s) - robust check
+            found_audio_for_cue = False
             for track in tracks:
                 if "FILE" in track:
                     audio_path_in_cue = track["FILE"]
-                    full_audio_path = os.path.normpath(
+                    # Try path relative to CUE file first
+                    full_audio_path_rel = os.path.normpath(
                         os.path.join(cue_dir, audio_path_in_cue)
                     )
-                    if os.path.exists(full_audio_path):
-                        original_audio_files.add(full_audio_path)
+                    # Also check if the path in CUE was absolute
+                    full_audio_path_abs = os.path.normpath(audio_path_in_cue)
+
+                    if os.path.exists(full_audio_path_rel):
+                        original_audio_files.add(full_audio_path_rel)
+                        found_audio_for_cue = True
+                    elif os.path.exists(full_audio_path_abs):
+                        original_audio_files.add(full_audio_path_abs)
+                        found_audio_for_cue = True
                     else:
+                        # Try common case: audio file has same base name as CUE file
                         cue_base = os.path.splitext(os.path.basename(cue_file))[0]
                         audio_ext = os.path.splitext(audio_path_in_cue)[1]
                         alt_audio_path = os.path.normpath(
@@ -555,21 +835,21 @@ def task_split_cue(
                         )
                         if os.path.exists(alt_audio_path):
                             original_audio_files.add(alt_audio_path)
-                        else:
-                            progress_callback(
-                                f"  [!] Warning: Referenced audio file '{audio_path_in_cue}' not found near CUE."
-                            )
-            if not original_audio_files:
+                            found_audio_for_cue = True
+                        # else: # Don't warn for every track, just once if none found
+                        #     pass
+
+            if not found_audio_for_cue:
                 progress_callback(
                     f"  [!] Error: Could not find any existing audio file referenced in the CUE sheet."
                 )
                 fail_count += 1
-                continue
+                continue  # Skip this CUE file
 
         except Exception as e_info:
             progress_callback(f"  [!] Error getting info from CUE: {e_info}")
             fail_count += 1
-            continue
+            continue  # Skip this CUE file
         # --- End of Step 1 ---
 
         # --- Start of Step 2: Perform Split ---
@@ -577,40 +857,68 @@ def task_split_cue(
             f"  Splitting to format '{output_format}' into: {effective_output_dir}"
             + (f" (Collection: {collection})" if collection else "")
         )
+        split_op = None  # Define scope
         try:
+            # Prepare arguments for FileSystemOperations
             kwargs = {
                 "filename": cue_file,
-                "outputdir": effective_output_dir,  # Use the determined output dir
+                "outputdir": effective_output_dir,
                 "outputformat": output_format,
-                "collection": collection,
+                "collection": (
+                    collection if collection else None
+                ),  # Pass None if empty string
                 "overwrite": overwrite_mode,
                 "ffmpeg_cmd": ffmpeg_path,
                 "ffprobe_cmd": ffprobe_path,
                 "prg_loglevel": FFCS_PROG_LOG_LEVEL,
                 "ffmpeg_loglevel": FFMPEG_LOG_LEVEL,
-                "progress_meter": "standard",
-                "dry": False,
+                "progress_meter": "standard",  # Or None? Check library docs/behavior
+                "dry": False,  # Actually perform the split
             }
             split_op = FileSystemOperations(**kwargs)
-            overwr = (
-                split_op.check_for_overwriting()
-            )  # Check destination based on kwargs
-            if not overwr:
-                split_op.work_on_temporary_directory()  # Library handles moving to final outputdir
-                split_successful = True
-                progress_callback("  Split command sequence executed.")
-            else:
-                progress_callback(
-                    f"  Skipped: Overwrite needed but not permitted (Overwrite mode: '{overwrite_mode}')."
-                )
-                skipped_count += 1
+
+            # Check for potential overwrites *before* executing
+            overwr = split_op.check_for_overwriting()
+            if overwr:
+                # Library's check returns a list of files that would be overwritten.
+                # If the list is not empty and overwrite mode is 'no', skip.
+                if overwrite_mode == "no":
+                    progress_callback(
+                        f"  Skipped: Output file(s) already exist and overwrite mode is 'no'."
+                    )
+                    progress_callback(f"  Files that would be overwritten: {overwr}")
+                    skipped_count += 1
+                    continue  # Skip this CUE file
+                elif overwrite_mode == "force":
+                    progress_callback(
+                        f"  Warning: Overwriting existing file(s) as per 'force' mode: {overwr}"
+                    )
+                # If mode is 'ask', this library isn't interactive, so treat like 'no'? Or proceed?
+                # Assuming GUI handles 'ask' logic before calling task, treat 'ask' like 'no' here.
+                elif overwrite_mode == "ask":
+                    progress_callback(
+                        f"  Skipped: Output file(s) already exist and overwrite mode is 'ask' (treated as 'no' in non-interactive task)."
+                    )
+                    progress_callback(f"  Files that would be overwritten: {overwr}")
+                    skipped_count += 1
+                    continue
+
+            # Execute the split operation
+            split_op.work_on_temporary_directory()  # This performs the split & moves files
+            split_successful = True
+            progress_callback("  Split command sequence executed successfully.")
 
         except Exception as e_split:
             progress_callback(
                 f"  [!] Error during split execution: {type(e_split).__name__} - {e_split}"
             )
+            import traceback
+
+            progress_callback(traceback.format_exc())  # Log traceback for split errors
             fail_count += 1
             split_successful = False
+            # No cleanup of originals needed if split failed
+            continue  # Move to next CUE file
         # --- End of Step 2 ---
 
         # --- Start of Step 3: Cleanup (MODIFIED) ---
@@ -618,127 +926,115 @@ def task_split_cue(
             success_count += 1
             progress_callback(f"  Split successful. Cleaning up original files...")
             files_to_delete = {os.path.normpath(cue_file)}
-            files_to_delete.update(original_audio_files)
+            files_to_delete.update(
+                original_audio_files
+            )  # Add all found original audio files
 
-            # Add log file with same base name as CUE, in the CUE's original directory
-            cue_base_name = os.path.splitext(os.path.basename(cue_file))[
-                0
-            ]  # Get base name without ext
-            log_file_path = os.path.normpath(
+            # Add log file with same base name as CUE, in the CUE's original directory (if it exists)
+            cue_base_name = os.path.splitext(os.path.basename(cue_file))[0]
+            log_file_path_cue_dir = os.path.normpath(
                 os.path.join(cue_dir, f"{cue_base_name}.log")
-            )  # Log in CUE dir
-            if os.path.exists(log_file_path):
-                files_to_delete.add(log_file_path)
+            )
+            if os.path.exists(log_file_path_cue_dir):
+                files_to_delete.add(log_file_path_cue_dir)
 
             # Delete ffcuesplitter.log from the effective output directory (where it's generated)
-            # Handle potential collection subdirectory structure as well
-            # Note: ffcuesplitter *should* handle its own log rotation/management ideally,
-            # but we explicitly delete it here as requested.
+            # The library *should* place this log in the final output dir, potentially within collection subdirs.
+            ffcs_log_name = "ffcuesplitter.log"
+            # Determine the *actual* final directory structure created by ffcuesplitter
+            # This is tricky without direct feedback from the library.
+            # We can *guess* based on the collection mode and metadata.
+            final_log_dir = effective_output_dir
+            if (
+                collection and info_getter and info_getter.cue.meta
+            ):  # Check if we have info_getter and metadata
+                cd_info = info_getter.cue.meta.data
+                artist = cd_info.get("PERFORMER", "")
+                album = cd_info.get("ALBUM", "")
 
-            # Base path for the log file (without collection structure)
-            ffcs_log_base_path = os.path.join(effective_output_dir, "ffcuesplitter.log")
+                # Use library's own path sanitization if possible, otherwise basic one
+                sanitize = getattr(
+                    split_op,
+                    "_FileSystemOperations__sanitize_path_element",
+                    lambda x: "".join(
+                        c for c in x if c.isalnum() or c in (" ", "_", "-")
+                    ).rstrip(),
+                )
 
-            # Check if collection is used to adjust the path
-            ffcs_log_path = ffcs_log_base_path
-            if collection:
-                # We need to figure out the *actual* subdirs created.
-                # FileSystemOperations doesn't directly expose this easily after run.
-                # Simplest approach: Check the base output dir AND potential artist/album dirs.
-                # This isn't perfect but covers common cases.
-                potential_paths_to_check = {ffcs_log_base_path}
-                try:
-                    # Try to get artist/album from CUE info again for path guess
-                    # Re-use info_getter if still valid, or recreate minimally
-                    if "info_getter" not in locals():
-                        info_getter = FFCueSplitter(
-                            filename=cue_file, dry=True, prg_loglevel="error"
-                        )
+                sanitized_artist = sanitize(artist) if artist else None
+                sanitized_album = sanitize(album) if album else None
 
-                    cd_info = info_getter.cue.meta.data
-                    artist = cd_info.get("PERFORMER", "")
-                    album = cd_info.get("ALBUM", "")
+                path_parts = []
+                if collection == "artist" and sanitized_artist:
+                    path_parts.append(sanitized_artist)
+                elif collection == "album" and sanitized_album:
+                    path_parts.append(sanitized_album)
+                elif (
+                    collection == "artist+album"
+                    and sanitized_artist
+                    and sanitized_album
+                ):
+                    path_parts.append(sanitized_artist)
+                    path_parts.append(sanitized_album)
 
-                    # Sanitize artist/album names for path use (basic example)
-                    def sanitize(name):
-                        return "".join(
-                            c for c in name if c.isalnum() or c in (" ", "_", "-")
-                        ).rstrip()
+                if path_parts:
+                    final_log_dir = os.path.join(effective_output_dir, *path_parts)
 
-                    sanitized_artist = sanitize(artist)
-                    sanitized_album = sanitize(album)
+            # Now construct the potential path to the log file
+            ffcs_log_path = os.path.normpath(os.path.join(final_log_dir, ffcs_log_name))
 
-                    if collection == "artist" and sanitized_artist:
-                        potential_paths_to_check.add(
-                            os.path.join(
-                                effective_output_dir,
-                                sanitized_artist,
-                                "ffcuesplitter.log",
-                            )
-                        )
-                    elif collection == "album" and sanitized_album:
-                        potential_paths_to_check.add(
-                            os.path.join(
-                                effective_output_dir,
-                                sanitized_album,
-                                "ffcuesplitter.log",
-                            )
-                        )
-                    elif (
-                        collection == "artist+album"
-                        and sanitized_artist
-                        and sanitized_album
-                    ):
-                        potential_paths_to_check.add(
-                            os.path.join(
-                                effective_output_dir,
-                                sanitized_artist,
-                                sanitized_album,
-                                "ffcuesplitter.log",
-                            )
-                        )
-
-                except Exception as e_path:
+            if os.path.exists(ffcs_log_path):
+                files_to_delete.add(ffcs_log_path)
+            else:
+                # Log if not found, might indicate an issue or different library behavior
+                progress_callback(
+                    f"  Note: {ffcs_log_name} not found in expected output location ({final_log_dir}) for cleanup."
+                )
+                # Also check the base output dir just in case
+                ffcs_log_path_base = os.path.normpath(
+                    os.path.join(effective_output_dir, ffcs_log_name)
+                )
+                if final_log_dir != effective_output_dir and os.path.exists(
+                    ffcs_log_path_base
+                ):
+                    files_to_delete.add(ffcs_log_path_base)
                     progress_callback(
-                        f"  [!] Warning: Could not determine exact collection path for ffcuesplitter.log cleanup: {e_path}"
+                        f"  Found and added {ffcs_log_name} from base output directory."
                     )
 
-                # Check all potential paths
-                found_ffcs_log = False
-                for potential_path in potential_paths_to_check:
-                    norm_potential_path = os.path.normpath(potential_path)
-                    if os.path.exists(norm_potential_path):
-                        files_to_delete.add(norm_potential_path)
-                        found_ffcs_log = True
-                        # Assume only one log location exists per run
-                        break
-                if not found_ffcs_log:
-                    progress_callback(
-                        f"  Note: ffcuesplitter.log not found in expected output location(s) for cleanup."
-                    )
-
-            else:  # No collection used
-                norm_ffcs_log_path = os.path.normpath(ffcs_log_path)
-                if os.path.exists(norm_ffcs_log_path):
-                    files_to_delete.add(norm_ffcs_log_path)
-                else:
-                    progress_callback(
-                        f"  Note: ffcuesplitter.log not found in output directory ({effective_output_dir}) for cleanup."
-                    )
-
+            # Perform deletions
+            progress_callback(
+                f"  Files identified for deletion: { {os.path.basename(f) for f in files_to_delete} }"
+            )
+            deleted_count_this_cue = 0
+            failed_delete_count_this_cue = 0
             for file_to_del in files_to_delete:
-                safe_delete(file_to_del, progress_callback)
+                if safe_delete(file_to_del, progress_callback):
+                    deleted_count_this_cue += 1
+                else:
+                    failed_delete_count_this_cue += 1
+            if failed_delete_count_this_cue > 0:
+                progress_callback(
+                    f"  [!] Warning: Failed to delete {failed_delete_count_this_cue} original/log file(s)."
+                )
+            else:
+                progress_callback(
+                    f"  Successfully deleted {deleted_count_this_cue} original/log file(s)."
+                )
         # --- End of Step 3 ---
 
     # --- Final Summary ---
     summary = (
         f"CUE Splitting finished.\n"
-        f"Files Processed: {processed_count}\n"
+        f"CUE Files Processed: {processed_count}\n"
         f"Succeeded: {success_count}\n"
         f"Failed: {fail_count}\n"
-        f"Skipped (Overwrite): {skipped_count}"
+        f"Skipped (Overwrite/Error): {skipped_count}"  # Skipped includes overwrite and pre-split errors
     )
-    overall_success = fail_count == 0
+    # Overall success if no failures occurred during processing/splitting itself
+    overall_success = fail_count == 0 and processed_count > 0
     return overall_success, summary
+
 
 def task_fetch_vgmdb(progress_callback, album_id: str):
     """
@@ -746,40 +1042,78 @@ def task_fetch_vgmdb(progress_callback, album_id: str):
 
     Args:
         progress_callback (callable): Function to report progress/log messages.
-        album_id (str): The VGMdb album ID.
+        album_id (str): The VGMdb album ID (e.g., "12345") or full URL.
 
     Returns:
         tuple: (bool success, dict data or str error_message)
     """
-    progress_callback(f"Starting VGMdb fetch for ID: {album_id}")
+    progress_callback(f"Starting VGMdb fetch for input: {album_id}")
 
-    # Ensure album_id is just the number string
-    match = re.match(r'\d+', str(album_id))
-    if not match:
-        msg = f"Invalid VGMdb Album ID format: '{album_id}'. Should be numbers only."
-        progress_callback(f"[!] {msg}")
-        return False, msg
-    cleaned_album_id = match.group(0)
+    # Extract album ID from URL or use directly
+    cleaned_album_id = None
+    if isinstance(album_id, str):
+        match_url = re.search(r"vgmdb\.net/album/(\d+)", album_id)
+        if match_url:
+            cleaned_album_id = match_url.group(1)
+            progress_callback(f"  Extracted Album ID {cleaned_album_id} from URL.")
+        else:
+            match_id = re.match(r"\d+", album_id.strip())
+            if match_id:
+                cleaned_album_id = match_id.group(0)
+            else:
+                msg = f"Invalid VGMdb Album ID or URL format: '{album_id}'. Provide ID (e.g., 12345) or URL."
+                progress_callback(f"[!] {msg}")
+                return False, msg
+    else:  # Handle non-string input if necessary, e.g. integer
+        match_id = re.match(r"\d+", str(album_id))
+        if match_id:
+            cleaned_album_id = match_id.group(0)
+        else:
+            msg = (
+                f"Invalid VGMdb Album ID format: '{album_id}'. Should be numbers only."
+            )
+            progress_callback(f"[!] {msg}")
+            return False, msg
 
+    progress_callback(f"Attempting to fetch data for VGMdb ID: {cleaned_album_id}")
     try:
         # Call the scraper function, passing our progress_callback as the logger
-        scraped_data = scrape_vgmdb_album(cleaned_album_id, progress_callback)
+        # The scraper library itself might have internal logging; this adds our task logging.
+        scraped_data = scrape_vgmdb_album(cleaned_album_id, logger=progress_callback)
 
         if not scraped_data:
-            msg = "Scraper returned no data (check network/ID)."
+            # Scraper might return None or empty dict on failure without explicit error
+            msg = f"Scraper returned no data for ID {cleaned_album_id}. Check network connection, ID validity, and VGMdb status."
             progress_callback(f"[!] {msg}")
             return False, msg
         elif scraped_data.get("_error"):
-             msg = f"Scraping failed: {scraped_data['_error']}"
-             progress_callback(f"[!] {msg}")
-             # Return the partial data anyway so user can see what was found
-             return False, scraped_data # Return data dict even on error for inspection
+            # Check for specific error key the scraper might add
+            msg = f"Scraping failed for ID {cleaned_album_id}: {scraped_data['_error']}"
+            progress_callback(f"[!] {msg}")
+            # Return the partial data anyway so user can see what was found, but flag as failure
+            return False, scraped_data  # Return data dict even on error for inspection
         else:
-             progress_callback(f"Successfully fetched data for VGMdb ID {cleaned_album_id}.")
-             return True, scraped_data # Return the full dictionary on success
+            progress_callback(
+                f"Successfully fetched and parsed data for VGMdb ID {cleaned_album_id}."
+            )
+            return True, scraped_data  # Return the full dictionary on success
 
+    except ImportError:
+        # This shouldn't happen if Worker handles it, but as a fallback
+        progress_callback(
+            "[!] Error: 'vgmdb_scraper' library not found. Please install it (`pip install vgmdb-scraper`)."
+        )
+        return False, "Required library 'vgmdb_scraper' missing."
+    except requests.exceptions.RequestException as e:
+        progress_callback(
+            f"[!] Network error during VGMdb fetch for ID {cleaned_album_id}: {e}"
+        )
+        return False, f"Network error: {e}"
     except Exception as e:
-        progress_callback(f"[!] Unexpected error during VGMdb fetch: {type(e).__name__} - {e}")
+        progress_callback(
+            f"[!] Unexpected error during VGMdb fetch for ID {cleaned_album_id}: {type(e).__name__} - {e}"
+        )
         import traceback
-        progress_callback(traceback.format_exc()) # Log full traceback for debugging
-        return False, f"Unexpected error: {e}"
+
+        progress_callback(traceback.format_exc())  # Log full traceback for debugging
+        return False, f"Unexpected error during fetch: {e}"
